@@ -8,7 +8,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import snowflake.connector
 from dotenv import load_dotenv
@@ -147,6 +147,7 @@ class SnowflakeConfig:
             "warehouse": self.warehouse,
             "database": self.database,
             "schema": self.schema,
+            "autocommit": False,
         }
         if self.role:
             parameters["role"] = self.role
@@ -154,13 +155,17 @@ class SnowflakeConfig:
         return parameters
 
 
-def find_member_files(config: SnowflakeConfig) -> List[Path]:
-    if not DATA_DIRECTORY.is_dir():
+def find_member_files(
+    config: SnowflakeConfig, data_directory: Optional[Path] = None
+) -> List[Path]:
+    if data_directory is None:
+        data_directory = DATA_DIRECTORY
+    if not data_directory.is_dir():
         raise FileNotFoundError(
-            "Data directory does not exist: {}".format(DATA_DIRECTORY)
+            "Data directory does not exist: {}".format(data_directory)
         )
     matches = []
-    for path in sorted(DATA_DIRECTORY.glob(config.member_file_pattern)):
+    for path in sorted(data_directory.glob(config.member_file_pattern)):
         if not path.is_file():
             continue
         validate_member_filename(path)
@@ -168,14 +173,14 @@ def find_member_files(config: SnowflakeConfig) -> List[Path]:
     if not matches:
         raise FileNotFoundError(
             "No files matching {} were found in {}.".format(
-                config.member_file_pattern, DATA_DIRECTORY
+                config.member_file_pattern, data_directory
             )
         )
     LOGGER.info(
         "Found %s member file(s) matching %s in %s.",
         len(matches),
         config.member_file_pattern,
-        DATA_DIRECTORY,
+        data_directory,
     )
     return matches
 
@@ -354,8 +359,21 @@ def _sql_string_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def load_members(config: SnowflakeConfig) -> int:
-    file_paths = find_member_files(config)
+def load_members(
+    config: SnowflakeConfig, file_paths: Optional[List[Path]] = None
+) -> int:
+    if file_paths is None:
+        file_paths = find_member_files(config)
+    else:
+        file_paths = sorted(Path(path).resolve() for path in file_paths)
+        if not file_paths:
+            raise FileNotFoundError("No member files were provided for loading.")
+        for file_path in file_paths:
+            if not file_path.is_file():
+                raise FileNotFoundError(
+                    "Member file does not exist: {}".format(file_path)
+                )
+            validate_member_filename(file_path)
     total_input_rows = 0
     parsed_files = []
 
@@ -378,6 +396,24 @@ def load_members(config: SnowflakeConfig) -> int:
     try:
         with tempfile.TemporaryDirectory(prefix="member_load_") as temp_directory:
             with connection.cursor() as cursor:
+                member_id_column = next(
+                    (
+                        column
+                        for column in config.member_columns
+                        if column.upper() == "MEMBER_ID"
+                    ),
+                    None,
+                )
+                if member_id_column is None:
+                    raise ValueError(
+                        "MEMBER_COLUMNS must contain MEMBER_ID for retry-safe loads."
+                    )
+                stage_table = "TEMP_MEMBER_LOAD"
+                cursor.execute(
+                    "CREATE TEMPORARY TABLE {} LIKE {}".format(
+                        stage_table, config.table
+                    )
+                )
                 for file_path, member_rows in parsed_files:
                     normalized_file = Path(temp_directory) / file_path.name
                     with normalized_file.open(
@@ -410,7 +446,7 @@ def load_members(config: SnowflakeConfig) -> int:
                     staged_filename = normalized_file.name + ".gz"
                     columns = ", ".join(config.member_columns)
                     copy_sql = f"""
-                        COPY INTO {config.table}
+                        COPY INTO {stage_table}
                             ({columns})
                         FROM {config.stage}
                         FILES = ({_sql_string_literal(staged_filename)})
@@ -423,10 +459,36 @@ def load_members(config: SnowflakeConfig) -> int:
                         )
                         ON_ERROR = 'ABORT_STATEMENT'
                     """
-                    LOGGER.info("Loading %s into %s.", staged_filename, config.table)
+                    LOGGER.info(
+                        "Loading %s into temporary table %s.",
+                        staged_filename,
+                        stage_table,
+                    )
                     cursor.execute(copy_sql)
                     for result in cursor.fetchall():
                         LOGGER.info("COPY result: %s", result)
+
+                cursor.execute(
+                    """
+                    DELETE FROM {table} AS target
+                    USING {stage_table} AS source
+                    WHERE TO_VARCHAR(target.{member_id}) =
+                          TO_VARCHAR(source.{member_id})
+                    """.format(
+                        table=config.table,
+                        stage_table=stage_table,
+                        member_id=member_id_column,
+                    )
+                )
+                cursor.execute(
+                    "INSERT INTO {table} ({columns}) "
+                    "SELECT {columns} FROM {stage_table}".format(
+                        table=config.table,
+                        columns=columns,
+                        stage_table=stage_table,
+                    )
+                )
+                connection.commit()
 
                 cursor.execute(f"SELECT COUNT(*) FROM {config.table}")
                 row = cursor.fetchone()
@@ -445,6 +507,9 @@ def load_members(config: SnowflakeConfig) -> int:
                     record_count,
                 )
                 return record_count
+    except Exception:
+        connection.rollback()
+        raise
     finally:
         connection.close()
 

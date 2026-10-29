@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import snowflake.connector
 from dotenv import load_dotenv
@@ -206,28 +206,45 @@ def parse_redemption_feed(file_path: Path) -> List[Tuple[object, ...]]:
     return rows
 
 
-def find_redemption_files() -> List[Path]:
-    if not DATA_DIRECTORY.is_dir():
+def find_redemption_files(
+    data_directory: Optional[Path] = None
+) -> List[Path]:
+    if data_directory is None:
+        data_directory = DATA_DIRECTORY
+    if not data_directory.is_dir():
         raise FileNotFoundError(
-            "Data directory does not exist: {}".format(DATA_DIRECTORY)
+            "Data directory does not exist: {}".format(data_directory)
         )
     files = sorted(
         path.resolve()
-        for path in DATA_DIRECTORY.glob(REDEMPTION_FILE_PATTERN)
+        for path in data_directory.glob(REDEMPTION_FILE_PATTERN)
         if path.is_file()
     )
     if not files:
         raise FileNotFoundError(
             "No files matching {} were found in {}.".format(
-                REDEMPTION_FILE_PATTERN, DATA_DIRECTORY
+                REDEMPTION_FILE_PATTERN, data_directory
             )
         )
     LOGGER.info("Found %s redemption JSON file(s).", len(files))
     return files
 
 
-def load_redemptions(config: SnowflakeConfig) -> int:
-    files = find_redemption_files()
+def load_redemptions(
+    config: SnowflakeConfig, file_paths: Optional[List[Path]] = None
+) -> int:
+    files = (
+        find_redemption_files()
+        if file_paths is None
+        else sorted(Path(path).resolve() for path in file_paths)
+    )
+    if not files:
+        raise FileNotFoundError("No redemption files were provided for loading.")
+    for file_path in files:
+        if not file_path.is_file():
+            raise FileNotFoundError(
+                "Redemption feed does not exist: {}".format(file_path)
+            )
     feed_rows = []
     for file_path in files:
         rows = parse_redemption_feed(file_path)
@@ -238,31 +255,66 @@ def load_redemptions(config: SnowflakeConfig) -> int:
 
     connection = snowflake.connector.connect(**config.connection_parameters())
     try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS {table} (
+                    MEMBER_ID VARCHAR,
+                    FEED_DATE DATE,
+                    TXN_ID VARCHAR,
+                    TXN_DATE DATE,
+                    PARTNER VARCHAR,
+                    MILES_REDEEMED NUMBER(38, 0),
+                    STATUS VARCHAR
+                )
+                """.format(table=config.table)
+            )
         if feed_rows:
             columns = ", ".join(INSERT_COLUMNS)
-            placeholders = ", ".join(["%s"] * len(INSERT_COLUMNS))
-            insert_sql = (
-                "INSERT INTO {} ({}) VALUES ({})".format(
-                    config.table, columns, placeholders
-                )
+            stage_table = "TEMP_REDEMPTIONS_LOAD"
+            insert_sql = "INSERT INTO {} ({}) VALUES ({})".format(
+                stage_table,
+                columns,
+                ", ".join(["%s"] * len(INSERT_COLUMNS)),
             )
-            try:
-                with connection.cursor() as cursor:
-                    cursor.executemany(insert_sql, feed_rows)
-                connection.commit()
-            except Exception:
-                connection.rollback()
-                raise
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "CREATE TEMPORARY TABLE {} LIKE {}".format(
+                        stage_table, config.table
+                    )
+                )
+                cursor.executemany(insert_sql, feed_rows)
+                cursor.execute(
+                    """
+                    DELETE FROM {table} AS target
+                    USING {stage_table} AS source
+                    WHERE TO_VARCHAR(target.MEMBER_ID) =
+                          TO_VARCHAR(source.MEMBER_ID)
+                      AND TO_VARCHAR(target.TXN_ID) = TO_VARCHAR(source.TXN_ID)
+                    """.format(table=config.table, stage_table=stage_table)
+                )
+                cursor.execute(
+                    "INSERT INTO {table} ({columns}) "
+                    "SELECT {columns} FROM {stage_table}".format(
+                        table=config.table,
+                        columns=columns,
+                        stage_table=stage_table,
+                    )
+                )
+            connection.commit()
         else:
             LOGGER.info("No redemption transactions found in the validated feeds.")
 
         LOGGER.info(
-            "Load completed: %s file(s), %s redemption row(s) inserted into %s.",
+            "Load completed: %s file(s), %s redemption row(s) loaded into %s.",
             len(files),
             len(feed_rows),
             config.table,
         )
         return len(feed_rows)
+    except Exception:
+        connection.rollback()
+        raise
     finally:
         connection.close()
 
@@ -274,7 +326,7 @@ def main() -> int:
     )
     try:
         config = SnowflakeConfig.from_environment()
-        inserted_rows = load_redemptions(config)
+        loaded_rows = load_redemptions(config)
     except (
         FileNotFoundError,
         ValueError,
@@ -287,7 +339,7 @@ def main() -> int:
 
     print(
         "Redemption load completed successfully. "
-        "{} row(s) inserted into {}.".format(inserted_rows, config.table)
+        "{} row(s) loaded into {}.".format(loaded_rows, config.table)
     )
     return 0
 

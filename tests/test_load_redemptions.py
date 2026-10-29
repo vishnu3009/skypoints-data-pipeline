@@ -370,7 +370,7 @@ class LoadRedemptionsTests(unittest.TestCase):
         connection.cursor.return_value.__enter__.return_value = cursor
         return connection, cursor
 
-    def test_inserts_all_flattened_rows_and_commits(self):
+    def test_replaces_existing_transactions_and_commits(self):
         self.write_feed(sample_feed())
         connection, cursor = self.make_connection()
 
@@ -383,12 +383,17 @@ class LoadRedemptionsTests(unittest.TestCase):
         connect.assert_called_once_with(
             **self.config.connection_parameters()
         )
-        sql, rows = cursor.executemany.call_args.args
-        self.assertIn("INSERT INTO REDEMPTIONS_RAW", sql)
-        self.assertIn("MEMBER_ID, FEED_DATE, TXN_ID", sql)
+        insert_sql, rows = cursor.executemany.call_args.args
+        self.assertIn("INSERT INTO TEMP_REDEMPTIONS_LOAD", insert_sql)
+        self.assertIn("MEMBER_ID, FEED_DATE, TXN_ID", insert_sql)
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0][0], "223457")
         self.assertEqual(rows[1][2], "RX10092")
+        statements = [call.args[0] for call in cursor.execute.call_args_list]
+        self.assertIn("CREATE TABLE IF NOT EXISTS REDEMPTIONS_RAW", statements[0])
+        self.assertIn("CREATE TEMPORARY TABLE TEMP_REDEMPTIONS_LOAD", statements[1])
+        self.assertIn("DELETE FROM REDEMPTIONS_RAW", statements[2])
+        self.assertIn("INSERT INTO REDEMPTIONS_RAW", statements[3])
         connection.commit.assert_called_once_with()
         connection.rollback.assert_not_called()
         connection.close.assert_called_once_with()
@@ -432,6 +437,11 @@ class LoadRedemptionsTests(unittest.TestCase):
             self.assertEqual(loader.load_redemptions(self.config), 0)
 
         cursor.executemany.assert_not_called()
+        cursor.execute.assert_called_once()
+        self.assertIn(
+            "CREATE TABLE IF NOT EXISTS REDEMPTIONS_RAW",
+            cursor.execute.call_args.args[0],
+        )
         connection.commit.assert_not_called()
         connection.close.assert_called_once_with()
 
@@ -461,7 +471,7 @@ class LoadRedemptionsTests(unittest.TestCase):
         self.assertEqual(result, 0)
         print_note.assert_called_once_with(
             "Redemption load completed successfully. "
-            "2 row(s) inserted into REDEMPTIONS_RAW."
+            "2 row(s) loaded into REDEMPTIONS_RAW."
         )
 
     def test_main_prints_failure_note(self):

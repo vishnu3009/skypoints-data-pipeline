@@ -144,6 +144,7 @@ class SnowflakeConfigTests(unittest.TestCase):
                 "warehouse": "test-warehouse",
                 "database": "VISHNU_DB",
                 "schema": "INSURANCE_EH_SCHEMA",
+                "autocommit": False,
             },
         )
 
@@ -443,15 +444,51 @@ class LoadMembersTests(unittest.TestCase):
         self.assertEqual(count, 5)
         connect.assert_called_once_with(**self.config.connection_parameters())
         sql_statements = [call.args[0] for call in cursor.execute.call_args_list]
-        self.assertEqual(len(sql_statements), 3)
-        self.assertIn("PUT ", sql_statements[0])
-        self.assertIn("COPY INTO MEMBER_RAW", sql_statements[1])
-        self.assertIn("Member_Name, Member_Id", sql_statements[1])
-        self.assertIn("FIELD_DELIMITER = '|'", sql_statements[1])
-        self.assertIn("DATE_FORMAT = 'YYYY-MM-DD'", sql_statements[1])
-        self.assertIn("SKIP_HEADER = 0", sql_statements[1])
-        self.assertIn("SELECT COUNT(*) FROM MEMBER_RAW", sql_statements[2])
+        self.assertEqual(len(sql_statements), 6)
+        self.assertIn("CREATE TEMPORARY TABLE TEMP_MEMBER_LOAD", sql_statements[0])
+        self.assertIn("PUT ", sql_statements[1])
+        self.assertIn("COPY INTO TEMP_MEMBER_LOAD", sql_statements[2])
+        self.assertIn("Member_Name, Member_Id", sql_statements[2])
+        self.assertIn("FIELD_DELIMITER = '|'", sql_statements[2])
+        self.assertIn("DATE_FORMAT = 'YYYY-MM-DD'", sql_statements[2])
+        self.assertIn("SKIP_HEADER = 0", sql_statements[2])
+        self.assertIn("DELETE FROM MEMBER_RAW", sql_statements[3])
+        self.assertIn("INSERT INTO MEMBER_RAW", sql_statements[4])
+        self.assertIn("SELECT COUNT(*) FROM MEMBER_RAW", sql_statements[5])
+        connection.commit.assert_called_once_with()
         connection.close.assert_called_once_with()
+        connection.rollback.assert_not_called()
+
+    def test_multiple_member_files_are_loaded_into_one_idempotent_batch(self):
+        self.write_file(
+            "member_20240115.txt",
+            marked_file(detail_record(member_id="223457")),
+        )
+        self.write_file(
+            "member_20240116.txt",
+            marked_file(detail_record(name="Elena Updated", member_id="223457")),
+        )
+        connection, cursor = self.make_connection()
+
+        with mock.patch.object(
+            loader.snowflake.connector, "connect", return_value=connection
+        ):
+            loader.load_members(self.config)
+
+        sql_statements = [call.args[0] for call in cursor.execute.call_args_list]
+        self.assertEqual(
+            sum("COPY INTO TEMP_MEMBER_LOAD" in sql for sql in sql_statements),
+            2,
+        )
+        self.assertEqual(
+            sum("DELETE FROM MEMBER_RAW" in sql for sql in sql_statements),
+            1,
+        )
+        self.assertEqual(
+            sum("INSERT INTO MEMBER_RAW" in sql for sql in sql_statements),
+            1,
+        )
+        connection.commit.assert_called_once_with()
 
     def test_invalid_input_does_not_connect(self):
         self.write_file("member_20240115.txt", "|D|Elena\n")
@@ -469,6 +506,7 @@ class LoadMembersTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "Snowflake failure"):
                 loader.load_members(self.config)
+        connection.rollback.assert_called_once_with()
         connection.close.assert_called_once_with()
 
     def test_missing_validation_result_raises_and_closes(self):
