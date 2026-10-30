@@ -64,10 +64,15 @@ class SnowflakeConfig:
             )
 
         table = os.environ["SNOWFLAKE_REDEMPTIONS_TABLE"]
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", table):
-            raise ValueError(
-                "SNOWFLAKE_REDEMPTIONS_TABLE must be a simple Snowflake identifier."
-            )
+        for name, value in (
+            ("SNOWFLAKE_DATABASE", os.environ["SNOWFLAKE_DATABASE"]),
+            ("SNOWFLAKE_SCHEMA", os.environ["SNOWFLAKE_SCHEMA"]),
+            ("SNOWFLAKE_REDEMPTIONS_TABLE", table),
+        ):
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", value):
+                raise ValueError(
+                    "{} must be a simple Snowflake identifier.".format(name)
+                )
 
         return cls(
             account=os.environ["SNOWFLAKE_ACCOUNT"],
@@ -256,6 +261,9 @@ def load_redemptions(
     connection = snowflake.connector.connect(**config.connection_parameters())
     try:
         with connection.cursor() as cursor:
+            cursor.execute(
+                "USE SCHEMA {}.{}".format(config.database, config.schema)
+            )
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS {table} (

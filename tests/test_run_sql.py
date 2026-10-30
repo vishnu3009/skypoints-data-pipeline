@@ -49,8 +49,8 @@ def valid_environment():
         "SNOWFLAKE_USER": "test-user",
         "SNOWFLAKE_PASSWORD": "test-password",
         "SNOWFLAKE_WAREHOUSE": "test-warehouse",
-        "SNOWFLAKE_DATABASE": "test-database",
-        "SNOWFLAKE_SCHEMA": "test-schema",
+        "SNOWFLAKE_DATABASE": "TEST_DATABASE",
+        "SNOWFLAKE_SCHEMA": "TEST_SCHEMA",
         "SNOWFLAKE_ROLE": "LOADER_ROLE",
     }
 
@@ -65,7 +65,7 @@ class ConnectionParametersTests(unittest.TestCase):
             dotenv_path=runner.ENV_FILE, override=False
         )
         self.assertEqual(parameters["account"], "test-account")
-        self.assertEqual(parameters["database"], "test-database")
+        self.assertEqual(parameters["database"], "TEST_DATABASE")
         self.assertEqual(parameters["role"], "LOADER_ROLE")
         self.assertFalse(parameters["autocommit"])
 
@@ -93,7 +93,13 @@ class RunSqlFileTests(unittest.TestCase):
             [mock.MagicMock(description=None), mock.MagicMock(description=None)]
         )
         with mock.patch.object(
-            runner, "connection_parameters", return_value={"account": "test"}
+            runner,
+            "connection_parameters",
+            return_value={
+                "account": "test",
+                "database": "TEST_DATABASE",
+                "schema": "TEST_SCHEMA",
+            },
         ), mock.patch.object(
             runner.snowflake.connector,
             "connect",
@@ -102,6 +108,9 @@ class RunSqlFileTests(unittest.TestCase):
             statement_count = runner.run_sql_file(self.sql_file)
 
         self.assertEqual(statement_count, 2)
+        self.cursor.execute.assert_called_once_with(
+            "USE SCHEMA TEST_DATABASE.TEST_SCHEMA"
+        )
         self.connection.execute_stream.assert_called_once()
         self.connection.commit.assert_called_once_with()
         self.connection.rollback.assert_not_called()
@@ -113,7 +122,13 @@ class RunSqlFileTests(unittest.TestCase):
         )
         self.cursor.fetchone.return_value = (2,)
         with mock.patch.object(
-            runner, "connection_parameters", return_value={"account": "test"}
+            runner,
+            "connection_parameters",
+            return_value={
+                "account": "test",
+                "database": "TEST_DATABASE",
+                "schema": "TEST_SCHEMA",
+            },
         ), mock.patch.object(
             runner.snowflake.connector,
             "connect",
@@ -122,9 +137,13 @@ class RunSqlFileTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "2 ERROR issue"):
                 runner.run_sql_file(self.sql_file, fail_on_error=True)
 
-        self.cursor.execute.assert_called_once_with(
-            "SELECT COUNT(*) FROM DATA_QUALITY_ISSUES "
-            "WHERE SEVERITY = 'ERROR'"
+        self.assertEqual(
+            [call.args[0] for call in self.cursor.execute.call_args_list],
+            [
+                "USE SCHEMA TEST_DATABASE.TEST_SCHEMA",
+                "SELECT COUNT(*) FROM DATA_QUALITY_ISSUES "
+                "WHERE SEVERITY = 'ERROR'",
+            ],
         )
         self.connection.rollback.assert_called_once_with()
         self.connection.close.assert_called_once_with()

@@ -388,12 +388,16 @@ class LoadRedemptionsTests(unittest.TestCase):
         self.assertIn("MEMBER_ID, FEED_DATE, TXN_ID", insert_sql)
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0][0], "223457")
+        self.assertEqual(
+            cursor.execute.call_args_list[0].args[0],
+            "USE SCHEMA VISHNU_DB.INSURANCE_EH_SCHEMA",
+        )
         self.assertEqual(rows[1][2], "RX10092")
         statements = [call.args[0] for call in cursor.execute.call_args_list]
-        self.assertIn("CREATE TABLE IF NOT EXISTS REDEMPTIONS_RAW", statements[0])
-        self.assertIn("CREATE TEMPORARY TABLE TEMP_REDEMPTIONS_LOAD", statements[1])
-        self.assertIn("DELETE FROM REDEMPTIONS_RAW", statements[2])
-        self.assertIn("INSERT INTO REDEMPTIONS_RAW", statements[3])
+        self.assertIn("CREATE TABLE IF NOT EXISTS REDEMPTIONS_RAW", statements[1])
+        self.assertIn("CREATE TEMPORARY TABLE TEMP_REDEMPTIONS_LOAD", statements[2])
+        self.assertIn("DELETE FROM REDEMPTIONS_RAW", statements[3])
+        self.assertIn("INSERT INTO REDEMPTIONS_RAW", statements[4])
         connection.commit.assert_called_once_with()
         connection.rollback.assert_not_called()
         connection.close.assert_called_once_with()
@@ -437,10 +441,10 @@ class LoadRedemptionsTests(unittest.TestCase):
             self.assertEqual(loader.load_redemptions(self.config), 0)
 
         cursor.executemany.assert_not_called()
-        cursor.execute.assert_called_once()
+        self.assertEqual(cursor.execute.call_count, 2)
         self.assertIn(
             "CREATE TABLE IF NOT EXISTS REDEMPTIONS_RAW",
-            cursor.execute.call_args.args[0],
+            cursor.execute.call_args_list[1].args[0],
         )
         connection.commit.assert_not_called()
         connection.close.assert_called_once_with()

@@ -3,12 +3,20 @@ I run a global airline loyalty program called SkyPoints, with lounges and partne
 
 ## Member staging and country tables
 
-Run `sql/load_member_staging.sql` after loading the member feed into `MEMBER_RAW`.
-It rebuilds `MEMBER_STAGING` with the derived `AGE` and `STALE_MEMBER` columns.
-Then run `sql/split_member_countries.sql` in the same database and schema. It
-keeps one row per `Member_Id` and rebuilds a `MEMBER_COUNTRY_<Country>` table
-for every country currently or previously represented in staging. A registry
-lets a country table be emptied when its last member moves away.
+Before the first member load, run `sql/create_member_tables.sql` in the target
+database and schema. It creates the `MEMBER_RAW` landing table and defines the
+staging-table columns. Set `SNOWFLAKE_TABLE=MEMBER_RAW` for the supplied DDL and
+loader configuration. The named stage and file format must also exist.
+
+Run `sql/load_member_staging.sql` after loading the member feed into
+`MEMBER_RAW`. It rebuilds `MEMBER_STAGING` with the derived `AGE` and
+`STALE_MEMBER` columns. Then run `sql/split_member_countries.sql` in the same
+database and schema. That script creates or replaces a
+`MEMBER_COUNTRY_<Country>` target table for every country currently or
+previously represented in staging, selecting one row per `Member_Id`. The
+target table DDL is generated from `MEMBER_STAGING` so it follows the staged
+profile schema. A registry lets a country table be emptied when its last
+member moves away.
 
 The country-splitting SQL uses the greatest `Last_Flight_Date` as the available
 proxy for record recency, with `Enrollment_Date` as a tie-breaker. Neither field

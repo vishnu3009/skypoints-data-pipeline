@@ -396,6 +396,9 @@ def load_members(
     try:
         with tempfile.TemporaryDirectory(prefix="member_load_") as temp_directory:
             with connection.cursor() as cursor:
+                cursor.execute(
+                    "USE SCHEMA {}.{}".format(config.database, config.schema)
+                )
                 member_id_column = next(
                     (
                         column

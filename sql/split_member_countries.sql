@@ -28,8 +28,11 @@ WHERE s.Country IS NOT NULL
       WHERE r.Country = s.Country
   );
 
+COMMIT;
+
 -- Rebuild one table per current or previously seen country. Country values are
 -- bound as values; quoted identifiers allow country names with punctuation.
+EXECUTE IMMEDIATE $$
 DECLARE
     country_cursor CURSOR FOR
         SELECT Country
@@ -48,3 +51,4 @@ BEGIN
         EXECUTE IMMEDIATE :create_sql USING (target_table, country_code);
     END FOR;
 END;
+$$;

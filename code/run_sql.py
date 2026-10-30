@@ -4,6 +4,7 @@ import argparse
 import io
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Dict
 
@@ -34,6 +35,12 @@ def connection_parameters() -> Dict[str, object]:
             "Missing or empty Snowflake setting(s): {}".format(", ".join(missing))
         )
 
+    for name in ("SNOWFLAKE_DATABASE", "SNOWFLAKE_SCHEMA"):
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", os.environ[name]):
+            raise ValueError(
+                "{} must be a simple Snowflake identifier.".format(name)
+            )
+
     parameters = {
         "account": os.environ["SNOWFLAKE_ACCOUNT"],
         "user": os.environ["SNOWFLAKE_USER"],
@@ -60,8 +67,16 @@ def run_sql_file(sql_file: Path, fail_on_error: bool = False) -> int:
     if not sql_text.strip():
         raise ValueError("SQL file is empty: {}".format(sql_file))
 
-    connection = snowflake.connector.connect(**connection_parameters())
+    parameters = connection_parameters()
+    connection = snowflake.connector.connect(**parameters)
     try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "USE SCHEMA {}.{}".format(
+                    parameters["database"],
+                    parameters["schema"],
+                )
+            )
         statement_count = 0
         with connection.cursor() as cursor:
             for result_cursor in connection.execute_stream(io.StringIO(sql_text)):
